@@ -3715,6 +3715,8 @@ static send_func_t fw_send_func_old;
 static volatile bool fw_reply_rx = false;
 static volatile bool fw_reply_ok = false;
 static volatile lbm_cid fw_rx_cid = -1;
+static char *fw_rx_buf = NULL;
+static int fw_rx_buf_len = 0;
 
 static void fw_reply_func(unsigned char *data, unsigned int len) {
 	if (len < 2) {
@@ -3739,7 +3741,22 @@ static void fw_reply_func(unsigned char *data, unsigned int len) {
 	case COMM_LISP_SET_RUNNING:
 		fw_reply_ok = data[0];
 		break;
-
+	case COMM_FW_VERSION:
+	case COMM_CUSTOM_APP_DATA:
+	case COMM_FORWARD_CAN:
+		if (fw_rx_buf == NULL) {
+    		fw_rx_buf = malloc(len);
+		} else if (len > fw_rx_buf_len) {
+    		free(fw_rx_buf);
+    		fw_rx_buf = malloc(len);
+		}
+		if (fw_rx_buf == NULL) { //Error
+        	break;
+    	}
+		memcpy(fw_rx_buf, data, len);
+		fw_rx_buf_len=len;
+		fw_reply_ok = data[0];
+		break;
 	default:
 		return;
 	}
@@ -3996,6 +4013,47 @@ static lbm_value ext_lbm_run(lbm_value *args, lbm_uint argn) {
 		xTaskCreatePinnedToCore(lbm_run_task, "LBM Restart", 2048, (void*)lbm_dec_as_i32(args[0]), 7, NULL, tskNO_AFFINITY);
 		return ENC_SYM_TRUE;
 	}
+}
+
+// (comm-cmd data) -> array, nil
+static lbm_value ext_comm_cmd(lbm_value *args, lbm_uint argn) {
+	if (argn > 1 || (!lbm_is_cons(args[0]) && !lbm_is_array_r(args[0]))) {
+		return ENC_SYM_TERROR;
+	}
+		lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[0]);
+		fw_rx_buf_len = 0;
+		fw_reply_rx = false;
+		fw_reply_ok = false;
+		fw_rx_cid = -1;
+		fw_send_func_old = commands_get_send_func();
+		commands_process_packet((uint8_t*)array->data, array->size, fw_reply_func);
+		fw_rx_cid = lbm_get_current_cid();
+
+		lbm_value res = ENC_SYM_MERROR;
+		if (lbm_create_array(&res, fw_rx_buf_len)) {
+			lbm_array_header_t *header = (lbm_array_header_t*)lbm_car(res);
+			if(fw_rx_buf==NULL)
+			{
+				lbm_free(header->data);
+				header->data=0;
+				res = ENC_SYM_MERROR;
+			}
+			if(fw_rx_buf_len == 0)
+			{
+				header->data=0;
+				res = ENC_SYM_NIL;
+			}
+			else
+			{
+				memcpy(header->data, fw_rx_buf, fw_rx_buf_len);
+			}
+		}
+		if (fw_reply_rx) {
+			return res;
+		} else {
+			lbm_block_ctx_from_extension_timeout(20.0);
+			return ENC_SYM_TRUE;
+		}
 }
 
 // AS504x encoder
@@ -4393,6 +4451,7 @@ void lispif_load_vesc_extensions(void) {
 	lbm_add_extension("crc32", ext_crc32);
 	lbm_add_extension("buf-find", ext_buf_find);
 	lbm_add_extension("buf-resize", ext_buf_resize);
+	lbm_add_extension("comm-cmd", ext_comm_cmd);
 
 	// Configuration
 	lbm_add_extension("conf-get", ext_conf_get);
