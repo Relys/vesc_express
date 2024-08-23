@@ -47,6 +47,7 @@ static char *error_internal_allocation_failed =
 	"Internal allocation failed, your service/chr capacity setting might be "
 	"too high.";
 static char *error_name_too_long       = "Name too long, max: 30 characters.";
+static char *error_addr_incorrect_len  = "BLE address incorrect length, must be 6 bytes.";
 static char *error_invalid_handle      = "Handle did not exist.";
 static char *error_service_wrong_order = "Service not last.";
 static char *error_packet_too_long =
@@ -57,6 +58,12 @@ static char *error_invalid_adv_channel = "Invalid advertising channel. Only 37, 
 	"and 39 are valid.";
 static char *error_invalid_adv_interval = "Invalid advertising interval. Must be "
 	"between 20 and 10240 ms.";
+static char *error_invalid_adv_type = "Invalid advertising type. Must be "
+	"between 0 and 4.";
+static char *error_invalid_own_addr_type = "Invalid BLE device address type. Must be "
+	"between 0 and 3.";
+static char *error_invalid_adv_filter_policy = "Invalid BLE avertising filter policy. Must be "
+	"between 0 and 3.";
 
 /**
  * Reverse the elements of an array.
@@ -805,6 +812,65 @@ static lbm_value ext_ble_set_name(lbm_value *args, lbm_uint argn) {
 }
 
 /**
+ * signature: (ble-set-rand-addr rand_addr:byte-array|list) -> bool
+ *
+ * @return True if esp_ble_gap_set_rand_addr succeeds, or eval_error
+ * if an error occurs, such as the address being longer than
+ * CUSTOM_BLE_TOO_LONG.
+ */
+static lbm_value ext_ble_set_rand_addr(lbm_value *args, lbm_uint argn) {
+	if (argn != 1 || !(lbm_is_array_r(args[0]) || lbm_is_list(args[0]))) {
+		return ENC_SYM_TERROR;
+	}
+
+	esp_bd_addr_t rand_addr_buffer;
+
+	if (lbm_is_list(args[0])) {
+		// loop over the list and set the bytes in the address buffer.
+		lbm_value next = args[0];
+		size_t i = 0;
+		while (lbm_is_cons(next) && i < ESP_BD_ADDR_LEN) {
+			lbm_value current = lbm_car(next);
+			next              = lbm_cdr(next);
+
+			if (!lbm_is_number(current)) {
+				lbm_set_error_suspect(current);
+				return ENC_SYM_TERROR;
+			}
+
+            uint32_t value = lbm_dec_as_u32(current);
+            rand_addr_buffer[i] = (uint8_t)value;
+			i++;
+		}
+		if (i != ESP_BD_ADDR_LEN){
+			lbm_set_error_reason(error_addr_incorrect_len);
+			return ENC_SYM_EERROR;
+		}
+	} else if (lbm_is_array_r(args[0])) {
+		lbm_array_header_t *data_array = lbm_dec_array_header(args[0]);
+		if (data_array->size != ESP_BD_ADDR_LEN){
+			lbm_set_error_reason(error_addr_incorrect_len);
+			return ENC_SYM_EERROR;
+		}
+        uint8_t *data_u8 = (uint8_t *)data_array->data;
+        for (size_t i = 0; i < ESP_BD_ADDR_LEN; i++) {
+            rand_addr_buffer[i] = data_u8[i];
+        }
+	}
+
+	custom_ble_result_t result = custom_ble_set_rand_addr(rand_addr_buffer);
+	switch (result) {
+		case CUSTOM_BLE_OK: {
+			return ENC_SYM_TRUE;
+		}
+		case CUSTOM_BLE_NOT_STARTED:
+		default: {
+			return ENC_SYM_EERROR;
+		}
+	}
+}
+
+/**
  * signature:
  *   (ble-conf-adv use-custom:false) -> bool
  *   (ble-conf-adv use-custom:bool adv-data:array|field-list|nil
@@ -1019,7 +1085,7 @@ static lbm_value ext_ble_conf_adv_set_channels(lbm_value *args, lbm_uint argn) {
  * @return False is returned if any internal error occurred, otherwise true.
  */
 static lbm_value ext_ble_conf_adv_set_interval(lbm_value *args, lbm_uint argn) {
-	LBM_CHECK_ARGN(2);
+	LBM_CHECK_ARGN(2); 
 
 	if (!lbm_is_number(args[0]) || !lbm_is_number(args[1])) {
 		return ENC_SYM_TERROR;
@@ -1035,6 +1101,84 @@ static lbm_value ext_ble_conf_adv_set_interval(lbm_value *args, lbm_uint argn) {
 
 	ble_adv_params.adv_int_min = min;
 	ble_adv_params.adv_int_max = max;
+
+	return ENC_SYM_TRUE;
+}
+
+/**
+ * signature:
+ *   (ble-conf-adv-set-type type:int) -> bool
+ *
+ * @param type Sets advertising mode.
+ * @return False is returned if any internal error occurred, otherwise true.
+ */
+static lbm_value ext_ble_conf_adv_set_type(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN(1);
+
+	if (!lbm_is_number(args[0])) {
+		return ENC_SYM_TERROR;
+	}
+
+	uint16_t type = (uint16_t)lbm_dec_as_u32(args[0]);
+
+	if (type > 0x4) {
+		lbm_set_error_reason(error_invalid_adv_type);
+		return ENC_SYM_EERROR;
+	}
+
+	ble_adv_params.adv_type = type;
+
+	return ENC_SYM_TRUE;
+}
+
+/**
+ * signature:
+ *   (ble-conf-adv-set-own-addr-type own_addr_type:int) -> bool
+ *
+ * @param own_addr_type Sets BLE device address type.
+ * @return False is returned if any internal error occurred, otherwise true.
+ */
+static lbm_value ext_ble_conf_adv_set_own_addr_type(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN(1);
+
+	if (!lbm_is_number(args[0])) {
+		return ENC_SYM_TERROR;
+	}
+
+	uint16_t own_addr_type = (uint16_t)lbm_dec_as_u32(args[0]);
+
+	if (own_addr_type > 0x3) {
+		lbm_set_error_reason(error_invalid_own_addr_type);
+		return ENC_SYM_EERROR;
+	}
+
+	ble_adv_params.own_addr_type = own_addr_type;
+
+	return ENC_SYM_TRUE;
+}
+
+/**
+ * signature:
+ *   (ble-conf-adv-set-filter-policy filter_policy:int) -> bool
+ *
+ * @param filter_policy Sets BLE avertising filter policy.
+ * @return False is returned if any internal error occurred, otherwise true.
+ */
+static lbm_value ext_ble_conf_adv_set_filter_policy(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN(1);
+
+	if (!lbm_is_number(args[0])) {
+		return ENC_SYM_TERROR;
+	}
+
+	uint16_t filter_policy = (uint16_t)lbm_dec_as_u32(args[0]);
+
+	if (filter_policy > 0x3) {
+		lbm_set_error_reason(error_invalid_adv_filter_policy);
+		return ENC_SYM_EERROR;
+	}
+
+	ble_adv_params.adv_filter_policy = filter_policy;
 
 	return ENC_SYM_TRUE;
 }
@@ -1270,9 +1414,13 @@ void lispif_load_ble_extensions(void) {
 
 	lbm_add_extension("ble-start-app", ext_ble_start_app);
 	lbm_add_extension("ble-set-name", ext_ble_set_name);
+	lbm_add_extension("ble-set-rand-addr", ext_ble_set_rand_addr);
 	lbm_add_extension("ble-conf-adv", ext_ble_conf_adv);
 	lbm_add_extension("ble-conf-adv-set-channels", ext_ble_conf_adv_set_channels);
 	lbm_add_extension("ble-conf-adv-set-interval", ext_ble_conf_adv_set_interval);
+	lbm_add_extension("ble-conf-adv-set-type", ext_ble_conf_adv_set_type);
+	lbm_add_extension("ble-conf-adv-set-own-addr-type", ext_ble_conf_adv_set_own_addr_type);
+	lbm_add_extension("ble-conf-adv-set-filter-policy", ext_ble_conf_adv_set_filter_policy);
 
 	lbm_add_extension("ble-add-service", ext_ble_add_service);
 	lbm_add_extension("ble-remove-service", ext_ble_remove_service);

@@ -627,6 +627,20 @@ custom_ble_result_t custom_ble_set_name(const char *name) {
 	return CUSTOM_BLE_OK;
 };
 
+custom_ble_result_t custom_ble_set_rand_addr(esp_bd_addr_t rand_addr) {
+	if (!has_started) {
+		return CUSTOM_BLE_NOT_STARTED;
+	}
+	esp_err_t result = esp_ble_gap_set_rand_addr(rand_addr);
+	if (result != ESP_OK) {
+		STORED_LOGF("esp_ble_gap_set_rand_addr error: %d", result);
+
+		return CUSTOM_BLE_ESP_ERROR;
+	}
+
+	return CUSTOM_BLE_OK;
+};
+
 custom_ble_result_t custom_ble_update_adv(
 	bool use_raw, size_t adv_len, const uint8_t adv_data_raw[adv_len],
 	size_t scan_rsp_len, const uint8_t scan_rsp_data_raw[scan_rsp_len]

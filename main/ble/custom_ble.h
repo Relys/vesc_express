@@ -119,6 +119,16 @@ typedef void (*attr_write_cb_t)(
 custom_ble_result_t custom_ble_set_name(const char *name);
 
 /**
+ * Configure random BLE address.
+ *
+ * @param rand_addr Buffer containing the random BLE address.
+ * @return Returns CUSTOM_BLE_OK if successfull, otherwise
+ * - CUSTOM_BLE_ESP_ERROR: The internal call to esp_ble_gap_set_rand_addr
+ *   failed.
+ */
+custom_ble_result_t custom_ble_set_rand_addr(esp_bd_addr_t rand_addr);
+
+/**
  * Configure if custom raw advertising and scan response packets should be used,
  * and which should be set if that is the case.
  * 
