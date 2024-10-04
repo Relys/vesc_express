@@ -67,6 +67,7 @@ set(COMPONENT_SRCS
 "display/lispif_disp_extensions.c"
 "display/disp_sh8501b.c"
 "display/disp_ili9341.c"
+"display/disp_gc9a01a.c"
 "display/disp_ssd1306.c"
 "display/disp_st7789.c"
 "display/disp_ili9488.c"

@@ -29,6 +29,7 @@
 
 #include "display/disp_sh8501b.h"
 #include "display/disp_ili9341.h"
+#include "display/disp_gc9a01a.h"
 #include "display/disp_ssd1306.h"
 #include "display/disp_st7789.h"
 #include "display/disp_ili9488.h"
@@ -2889,6 +2890,41 @@ static lbm_value ext_disp_load_st7735(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
+static lbm_value ext_disp_load_gc9a01a(lbm_value *args, lbm_uint argn) {
+    LBM_CHECK_ARGN_NUMBER(6);
+
+    int gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc;
+    gpio_sd0 = lbm_dec_as_i32(args[0]);
+    gpio_clk = lbm_dec_as_i32(args[1]);
+    gpio_cs = lbm_dec_as_i32(args[2]);
+    gpio_reset = lbm_dec_as_i32(args[3]);
+    gpio_dc = lbm_dec_as_i32(args[4]);
+
+    if (!gpio_is_valid(gpio_sd0) ||
+        !gpio_is_valid(gpio_clk) ||
+        !gpio_is_valid(gpio_cs) ||
+        !gpio_is_valid(gpio_reset) ||
+        !gpio_is_valid(gpio_dc)) {
+        lbm_set_error_reason(msg_invalid_gpio);
+        return ENC_SYM_EERROR;
+    }
+
+    uint32_t spi_mhz = lbm_dec_as_u32(args[5]);
+
+    if (spi_mhz == 0 || spi_mhz > 40) {
+        lbm_set_error_reason(msg_invalid_clk_speed);
+        return ENC_SYM_EERROR;
+    }
+
+    disp_gc9a01a_init(gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc, spi_mhz);
+
+	disp_render_image = disp_gc9a01a_render_image;
+	disp_clear = disp_gc9a01a_clear;
+	disp_reset = disp_gc9a01a_reset;
+    
+    return ENC_SYM_TRUE;
+}
+
 static lbm_value ext_disp_load_ssd1351(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(6);
 
@@ -3068,6 +3104,7 @@ void lispif_load_disp_extensions(void) {
 
 	lbm_add_extension("disp-load-sh8501b", ext_disp_load_sh8501b);
 	lbm_add_extension("disp-load-ili9341", ext_disp_load_ili9341);
+	lbm_add_extension("disp-load-gc9a01a", ext_disp_load_gc9a01a);
 	lbm_add_extension("disp-load-ssd1306", ext_disp_load_ssd1306);
 	lbm_add_extension("disp-load-st7789", ext_disp_load_st7789);
 	lbm_add_extension("disp-load-ili9488", ext_disp_load_ili9488);
