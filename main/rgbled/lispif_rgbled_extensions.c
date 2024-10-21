@@ -34,17 +34,23 @@
 #define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
 
 typedef struct {
-	rmt_encoder_t base;
-	rmt_encoder_t *bytes_encoder;
-	rmt_encoder_t *copy_encoder;
-	int state;
-	rmt_symbol_word_t reset_code;
+    rmt_encoder_t base;
+    rmt_encoder_t *bytes_encoder;
+    rmt_encoder_t *copy_encoder;
+    int state;
+    rmt_symbol_word_t reset_code;
 } rmt_led_strip_encoder_t;
 
-static rmt_channel_handle_t led_chan = NULL;
-static rmt_encoder_handle_t led_encoder = NULL;
-static unsigned int led_type_driver = 0;
-static int led_pin_driver = -1;
+typedef struct {
+    rmt_channel_handle_t chan;
+    rmt_encoder_handle_t encoder;
+    int gpio_num;
+} led_strip_t;
+
+static led_strip_t led_strips[SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS] = {0};
+static int led_strip_used[SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS] = {0};
+static int initialized_strip_indices[SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS] = {0};
+static int num_initialized_strips = 0;
 
 static const uint8_t gamma_table[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 		0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3,
@@ -64,7 +70,7 @@ static const uint8_t gamma_table[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 		250, 253, 255 };
 
 static rmt_transmit_config_t tx_config = {
-		.loop_count = 0, // no transfer loop
+    .loop_count = 0, // no transfer loop
 };
 
 static size_t rmt_encode_led_strip(
@@ -162,269 +168,358 @@ esp_err_t rmt_new_led_strip_encoder(rmt_encoder_handle_t *ret_encoder) {
 }
 
 static lbm_value ext_rgbled_deinit(lbm_value *args, lbm_uint argn) {
-	(void)args; (void)argn;
+    if (argn > 1) {
+        lbm_set_error_reason((char*)lbm_error_str_num_args);
+        return ENC_SYM_TERROR;
+    }
 
-	if (led_chan != NULL) {
-		rmt_tx_wait_all_done(led_chan, 100);
-		rmt_disable(led_chan);
-		rmt_del_channel(led_chan);
-		led_chan = NULL;
-	}
+    int pin = -1;
+    if (argn == 1) {
+        pin = lbm_dec_as_i32(args[0]);
+    }
 
-	if (led_encoder != NULL) {
-		rmt_del_encoder(led_encoder);
-		led_encoder = NULL;
-	}
+    bool found = false;
+    for (int i = 0; i < SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS; i++) {
+        if (led_strip_used[i] && (pin == -1 || led_strips[i].gpio_num == pin)) {
+            led_strip_t *strip = &led_strips[i];
 
-	if (led_pin_driver >= 0) {
-		gpio_reset_pin(led_pin_driver);
-		led_pin_driver = -1;
-	}
+            if (strip->chan != NULL) {
+                rmt_tx_wait_all_done(strip->chan, 100);
+                rmt_disable(strip->chan);
+                rmt_del_channel(strip->chan);
+                strip->chan = NULL;
+            }
+            if (strip->encoder != NULL) {
+                rmt_del_encoder(strip->encoder);
+                strip->encoder = NULL;
+            }
 
-	return ENC_SYM_TRUE;
+            led_strip_used[i] = 0;
+
+            // Remove from initialized strips list
+            for (int j = 0; j < num_initialized_strips; j++) {
+                if (initialized_strip_indices[j] == i) {
+                    // Shift the remaining elements
+                    for (int k = j; k < num_initialized_strips - 1; k++) {
+                        initialized_strip_indices[k] = initialized_strip_indices[k + 1];
+                    }
+                    num_initialized_strips--;
+                    break;
+                }
+            }
+
+            found = true;
+
+            if (pin != -1) break;
+        }
+    }
+
+    if (pin != -1 && !found) {
+        lbm_set_error_reason("Invalid pin number");
+        return ENC_SYM_TERROR;
+    }
+
+    return ENC_SYM_TRUE;
 }
 
 static lbm_value ext_rgbled_init(lbm_value *args, lbm_uint argn) {
-	LBM_CHECK_NUMBER_ALL();
+    LBM_CHECK_NUMBER_ALL();
 
-	if (argn != 1 && argn != 2) {
-		lbm_set_error_reason((char*)lbm_error_str_num_args);
-		return ENC_SYM_TERROR;
-	}
+    if (argn != 1) {
+        lbm_set_error_reason((char*)lbm_error_str_num_args);
+        return ENC_SYM_TERROR;
+    }
 
-	int pin = lbm_dec_as_i32(args[0]);
-	if (!utils_gpio_is_valid(pin)) {
-		lbm_set_error_reason(string_pin_invalid);
-		return ENC_SYM_TERROR;
-	}
+    int pin = lbm_dec_as_i32(args[0]);
+    if (!utils_gpio_is_valid(pin)) {
+        lbm_set_error_reason(string_pin_invalid);
+        return ENC_SYM_TERROR;
+    }
 
-	unsigned int type_led = 0;
-	if (argn >= 2) {
-		type_led = lbm_dec_as_u32(args[1]);
-		if (type_led >= 4) {
-			lbm_set_error_reason("Invalid LED type");
-			return ENC_SYM_TERROR;
-		}
-	}
+    // Check if the pin is already initialized
+    for (int i = 0; i < SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS; i++) {
+        if (led_strip_used[i] && led_strips[i].gpio_num == pin) {
+            // Pin is already initialized, so we'll just return success
+            return ENC_SYM_TRUE;
+        }
+    }
 
-	ext_rgbled_deinit(0, 0);
+    // If we reach here, the pin is not initialized, so we proceed with initialization
+    int slot = -1;
+    for (int i = 0; i < SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS; i++) {
+        if (!led_strip_used[i]) {
+            slot = i;
+            break;
+        }
+    }
 
-	led_type_driver = type_led;
-	led_pin_driver = pin;
+    if (slot == -1) {
+        lbm_set_error_reason("Maximum number of LED strips reached");
+        return ENC_SYM_TERROR;
+    }
 
-	rmt_tx_channel_config_t tx_chan_config = {
-			.clk_src = RMT_CLK_SRC_DEFAULT, // select source clock
-			.gpio_num = pin,
-			.mem_block_symbols = 64, // increase the block size can make the LED less flickering
-			.resolution_hz = RMT_LED_STRIP_RESOLUTION_HZ,
-			.trans_queue_depth = 4, // set the number of transactions that can be pending in the background
-	};
-	rmt_new_tx_channel(&tx_chan_config, &led_chan);
+    led_strip_t *strip = &led_strips[slot];
+    strip->gpio_num = pin;
 
-	rmt_new_led_strip_encoder(&led_encoder);
-	rmt_enable(led_chan);
+    rmt_tx_channel_config_t tx_chan_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT, // select source clock
+        .gpio_num = pin,
+        .mem_block_symbols = 64, // increase the block size can make the LED less flickering
+        .resolution_hz = RMT_LED_STRIP_RESOLUTION_HZ,
+        .trans_queue_depth = 4, // set the number of transactions that can be pending in the background
+    };
+    rmt_new_tx_channel(&tx_chan_config, &strip->chan);
 
-	return ENC_SYM_TRUE;
+    rmt_new_led_strip_encoder(&strip->encoder);
+    rmt_enable(strip->chan);
+
+    led_strip_used[slot] = 1;
+
+    // Add to initialized strips list
+    initialized_strip_indices[num_initialized_strips++] = slot;
+
+    return ENC_SYM_TRUE;
 }
 
 static lbm_value ext_rgbled_color_buffer(lbm_value *args, lbm_uint argn) {
-	LBM_CHECK_NUMBER_ALL();
+    LBM_CHECK_NUMBER_ALL();
 
-	unsigned int num_led = lbm_dec_as_u32(args[0]);
+    if (argn < 1 || argn > 3) {
+        lbm_set_error_reason((char*)lbm_error_str_num_args);
+        return ENC_SYM_TERROR;
+    }
 
-	uint8_t type_led = 0;
-	if (argn >= 2) {
-		type_led = lbm_dec_as_u32(args[1]);
-		if (type_led >= 4) {
-			lbm_set_error_reason("Invalid LED type");
-			return ENC_SYM_TERROR;
-		}
-	}
+    unsigned int num_led = lbm_dec_as_u32(args[0]);
 
-	uint8_t gamma_corr = 0;
-	if (argn >= 3) {
-		gamma_corr = lbm_dec_as_u32(args[2]);
-		if (gamma_corr > 1) {
-			gamma_corr = 1;
-		}
-	}
+    uint8_t type_led = 0;
+    if (argn >= 2) {
+        type_led = lbm_dec_as_u32(args[1]);
+        if (type_led >= 4) {
+            lbm_set_error_reason("Invalid LED type");
+            return ENC_SYM_TERROR;
+        }
+    }
+
+    uint8_t gamma_corr = 0;
+    if (argn >= 3) {
+        gamma_corr = lbm_dec_as_u32(args[2]);
+        if (gamma_corr > 1) {
+            gamma_corr = 1;
+        }
+    }
 
 	int led_colors = 3;
 	if (type_led >= 2) {
 		led_colors = 4;
 	}
 
-	lbm_value res;
-	if (lbm_create_array(&res, num_led * led_colors + 1)) {
-		lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(res);
-		uint8_t *data = (uint8_t*)arr->data;
+    lbm_value res;
+    if (lbm_create_array(&res, num_led * led_colors + 1)) {
+        lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(res);
+        uint8_t *data = (uint8_t*)arr->data;
 		memset(data, 0, arr->size);
-		data[0] = type_led | (gamma_corr << 4);
-		return res;
-	} else {
-		return ENC_SYM_MERROR;
-	}
+        data[0] = type_led | (gamma_corr << 4);
+        return res;
+    } else {
+        lbm_set_error_reason("Not enough memory for LED buffer");
+        return ENC_SYM_MERROR;
+    }
 }
 
 static lbm_value ext_rgbled_color(lbm_value *args, lbm_uint argn) {
-	if ((argn != 3 && argn != 4) || !lbm_is_array_r(args[0]) ||
-			!lbm_is_number(args[1]) || (!lbm_is_number(args[2]) && !lbm_is_list(args[2]))) {
-		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
-		return ENC_SYM_TERROR;
-	}
+    if ((argn != 3 && argn != 4) || !lbm_is_array_r(args[0]) ||
+            !lbm_is_number(args[1]) || (!lbm_is_number(args[2]) && !lbm_is_list(args[2]))) {
+        lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+        return ENC_SYM_TERROR;
+    }
 
-	lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[0]);
-	uint8_t *led_data = (uint8_t*)array->data;
-	uint8_t *led_pixels = led_data + 1;
-	int led_data_len = array->size - 1;
+    lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[0]);
+    uint8_t *led_data = (uint8_t*)array->data;
+    uint8_t *led_pixels = led_data + 1;
+    int led_data_len = array->size - 1;
 
-	char *invalid_arr_msg = "Invalid LED array";
+    char *invalid_arr_msg = "Invalid LED array";
 
-	uint8_t type_led = led_data[0] & 0x0F;
-	if (type_led >= 4) {
-		lbm_set_error_reason(invalid_arr_msg);
-		return ENC_SYM_TERROR;
-	}
+    uint8_t type_led = led_data[0] & 0x0F;
+    if (type_led >= 4) {
+        lbm_set_error_reason(invalid_arr_msg);
+        return ENC_SYM_TERROR;
+    }
 
-	uint8_t gamma_corr = led_data[0] >> 4;
+    uint8_t gamma_corr = led_data[0] >> 4;
 
-	int led_colors = 3;
-	if (type_led >= 2) {
-		led_colors = 4;
-	}
+    int led_colors = 3;
+    if (type_led >= 2) {
+        led_colors = 4;
+    }
 
-	if (led_data_len % led_colors != 0) {
-		lbm_set_error_reason(invalid_arr_msg);
-		return ENC_SYM_TERROR;
-	}
+    if (led_data_len % led_colors != 0) {
+        lbm_set_error_reason(invalid_arr_msg);
+        return ENC_SYM_TERROR;
+    }
 
-	int led_num = led_data_len / led_colors;
-	int led = lbm_dec_as_u32(args[1]);
+    int led_num = led_data_len / led_colors;
+    int led = lbm_dec_as_u32(args[1]);
 
-	int curr = args[2];
-	bool number = lbm_is_number(curr);
+    int curr = args[2];
+    bool number = lbm_is_number(curr);
 
-	float brightness = -1.0;
-	if (argn == 4) {
-		if (!lbm_is_number(args[3])) {
-			lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
-			return ENC_SYM_TERROR;
-		}
+    float brightness = -1.0;
+    if (argn == 4) {
+        if (!lbm_is_number(args[3])) {
+            lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+            return ENC_SYM_TERROR;
+        }
 
-		brightness = lbm_dec_as_float(args[3]);
-		utils_truncate_number(&brightness, 0.0, 1.0);
-	}
+        brightness = lbm_dec_as_float(args[3]);
+        utils_truncate_number(&brightness, 0.0, 1.0);
+    }
 
-	while (lbm_is_cons(curr) || number) {
-		lbm_value arg;
+    while (lbm_is_cons(curr) || number) {
+        lbm_value arg;
 
-		if (number) {
-			arg = curr;
-		} else {
-			arg = lbm_car(curr);
-		}
+        if (number) {
+            arg = curr;
+        } else {
+            arg = lbm_car(curr);
+        }
 
-		if (led >= led_num) {
-			break;
-		}
+        if (led >= led_num) {
+            break;
+        }
 
-		if (lbm_is_number(arg)) {
-			uint32_t color = lbm_dec_as_u32(arg);
+        if (lbm_is_number(arg)) {
+            uint32_t color = lbm_dec_as_u32(arg);
 
-			uint8_t w = (color >> 24) & 0xFF;
-			uint8_t r = (color >> 16) & 0xFF;
-			uint8_t g = (color >> 8) & 0xFF;
-			uint8_t b = color & 0xFF;
+            uint8_t w = (color >> 24) & 0xFF;
+            uint8_t r = (color >> 16) & 0xFF;
+            uint8_t g = (color >> 8) & 0xFF;
+            uint8_t b = color & 0xFF;
 
-			if (brightness >= 0.0) {
-				w = (uint8_t)roundf((float)w * brightness);
-				r = (uint8_t)roundf((float)r * brightness);
-				g = (uint8_t)roundf((float)g * brightness);
-				b = (uint8_t)roundf((float)b * brightness);
-			}
+            if (brightness >= 0.0) {
+                w = (uint8_t)roundf((float)w * brightness);
+                r = (uint8_t)roundf((float)r * brightness);
+                g = (uint8_t)roundf((float)g * brightness);
+                b = (uint8_t)roundf((float)b * brightness);
+            }
 
-			if (gamma_corr) {
-				w = gamma_table[w];
-				r = gamma_table[r];
-				g = gamma_table[g];
-				b = gamma_table[b];
-			}
+            if (gamma_corr) {
+                w = gamma_table[w];
+                r = gamma_table[r];
+                g = gamma_table[g];
+                b = gamma_table[b];
+            }
 
-			switch (type_led) {
-			case 0: // GRB
-				led_pixels[led * 3 + 0] = g;
-				led_pixels[led * 3 + 1] = r;
-				led_pixels[led * 3 + 2] = b;
-				break;
+            switch (type_led) {
+            case 0: // GRB
+                led_pixels[led * 3 + 0] = g;
+                led_pixels[led * 3 + 1] = r;
+                led_pixels[led * 3 + 2] = b;
+                break;
 
-			case 1: // RGB
-				led_pixels[led * 3 + 0] = r;
-				led_pixels[led * 3 + 1] = g;
-				led_pixels[led * 3 + 2] = b;
-				break;
+            case 1: // RGB
+                led_pixels[led * 3 + 0] = r;
+                led_pixels[led * 3 + 1] = g;
+                led_pixels[led * 3 + 2] = b;
+                break;
 
-			case 2: // GRBW
-				led_pixels[led * 4 + 0] = g;
-				led_pixels[led * 4 + 1] = r;
-				led_pixels[led * 4 + 2] = b;
-				led_pixels[led * 4 + 3] = w;
-				break;
+            case 2: // GRBW
+                led_pixels[led * 4 + 0] = g;
+                led_pixels[led * 4 + 1] = r;
+                led_pixels[led * 4 + 2] = b;
+                led_pixels[led * 4 + 3] = w;
+                break;
 
-			case 3: // RGBW
-				led_pixels[led * 4 + 0] = r;
-				led_pixels[led * 4 + 1] = g;
-				led_pixels[led * 4 + 2] = b;
-				led_pixels[led * 4 + 3] = w;
-				break;
+            case 3: // RGBW
+                led_pixels[led * 4 + 0] = r;
+                led_pixels[led * 4 + 1] = g;
+                led_pixels[led * 4 + 2] = b;
+                led_pixels[led * 4 + 3] = w;
+                break;
 
-			default:
-				break;
-			}
-		} else {
-			return ENC_SYM_EERROR;
-		}
+            default:
+                break;
+            }
+        } else {
+            return ENC_SYM_EERROR;
+        }
 
-		if (number) {
-			break;
-		}
+        if (number) {
+            break;
+        }
 
-		led++;
-		curr = lbm_cdr(curr);
-	}
+        led++;
+        curr = lbm_cdr(curr);
+    }
 
-	return ENC_SYM_TRUE;
+    return ENC_SYM_TRUE;
 }
 
 static lbm_value ext_rgbled_update(lbm_value *args, lbm_uint argn) {
-	if (led_encoder == NULL || led_chan == NULL) {
-		lbm_set_error_reason("Please run rgbled-init first");
-		if (led_encoder == NULL) {
-			commands_printf_lisp("led_encoder null");
-		}
+    if (argn != 1 && argn != 2) {
+        lbm_set_error_reason((char*)lbm_error_str_num_args);
+        return ENC_SYM_TERROR;
+    }
 
-		if (led_chan == NULL) {
-			commands_printf_lisp("led_chan null");
-		}
+    if (!lbm_is_array_r(args[0])) {
+        lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+        return ENC_SYM_TERROR;
+    }
 
-		return ENC_SYM_EERROR;
-	}
+    int pin = -1;
+    if (argn == 2) {
+        if (!lbm_is_number(args[1])) {
+            lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+            return ENC_SYM_TERROR;
+        }
+        pin = lbm_dec_as_i32(args[1]);
+    }
 
-	if (argn != 1 || !lbm_is_array_r(args[0])) {
-		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
-		return ENC_SYM_TERROR;
-	}
+    led_strip_t *strip = NULL;
+    if (pin == -1) {
+        if (num_initialized_strips == 0) {
+            lbm_set_error_reason("Please run rgbled-init first");
+            return ENC_SYM_EERROR;
+        }
+        // Use the last initialized strip
+        int last_index = initialized_strip_indices[num_initialized_strips - 1];
+        strip = &led_strips[last_index];
+    } else {
+        int i;
+        for (i = 0; i < SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS; i++) {
+            if (led_strip_used[i] && led_strips[i].gpio_num == pin) {
+                strip = &led_strips[i];
+                break;
+            }
+        }
+        if (i == SOC_RMT_CHANNELS_PER_GROUP * SOC_RMT_GROUPS) {
+            lbm_set_error_reason("Invalid pin number");
+            return ENC_SYM_TERROR;
+        }
+    }
 
-	lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[0]);
+    if (strip->encoder == NULL || strip->chan == NULL) {
+        lbm_set_error_reason("Please run rgbled-init first");
+        if (strip->encoder == NULL) {
+            commands_printf_lisp("LED encoder null for pin %d", strip->gpio_num);
+        }
+        if (strip->chan == NULL) {
+            commands_printf_lisp("RMT channel null for pin %d", strip->gpio_num);
+        }
+        return ENC_SYM_EERROR;
+    }
 
-	rmt_transmit(led_chan, led_encoder, (uint8_t*)array->data + 1, array->size - 1, &tx_config);
+    lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[0]);
 
-	return ENC_SYM_TRUE;
+    rmt_transmit(strip->chan, strip->encoder, (uint8_t*)array->data + 1, array->size - 1, &tx_config);
+
+    return ENC_SYM_TRUE;
 }
 
 void lispif_load_rgbled_extensions(void) {
-	lbm_add_extension("rgbled-init", ext_rgbled_init);
-	lbm_add_extension("rgbled-deinit", ext_rgbled_deinit);
-	lbm_add_extension("rgbled-buffer", ext_rgbled_color_buffer);
-	lbm_add_extension("rgbled-color", ext_rgbled_color);
-	lbm_add_extension("rgbled-update", ext_rgbled_update);
+    lbm_add_extension("rgbled-init", ext_rgbled_init);
+    lbm_add_extension("rgbled-deinit", ext_rgbled_deinit);
+    lbm_add_extension("rgbled-buffer", ext_rgbled_color_buffer);
+    lbm_add_extension("rgbled-color", ext_rgbled_color);
+    lbm_add_extension("rgbled-update", ext_rgbled_update);
 }
