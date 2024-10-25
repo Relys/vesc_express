@@ -188,25 +188,5 @@ const char *utils_bool_to_str(bool value) {
 }
 
 bool utils_gpio_is_valid(int pin) {
-	switch (pin) {
-	case 0:
-	case 1:
-	case 2:
-	case 3:
-	case 4:
-	case 5:
-	case 6:
-	case 7:
-	case 8:
-	case 9:
-	case 10:
-	case 18:
-	case 19:
-	case 20:
-	case 21:
-		return true;
-
-	default:
-		return false;
-	}
+	return true;
 }

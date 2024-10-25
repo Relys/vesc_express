@@ -32,6 +32,12 @@
 #include "lbm_prof.h"
 #include "esp_timer.h"
 #include "utils.h"
+#include "sdkconfig.h"
+#ifdef HW_PSRAM
+	#include "esp_heap_caps.h"
+	#include "esp_psram.h"
+	#include "esp_attr.h"
+#endif
 
 #define GC_STACK_SIZE			160
 #define PRINT_STACK_SIZE		128
@@ -53,9 +59,15 @@ static uint32_t *memory_array;
 static uint32_t *bitmap_array;
 static lbm_extension_t extension_storage[EXTENSION_STORAGE_SIZE + USER_EXTENSION_STORAGE_SIZE];
 
+#ifdef HW_PSRAM
+static void* psram_allocation = NULL;
+static size_t psram_allocation_size = 0;
+#endif
+
 static lbm_const_heap_t const_heap;
 static volatile lbm_uint *const_heap_ptr = 0;
 static int const_heap_max_ind = 0;
+static uint32_t const_heap_len = 0;
 
 static lbm_string_channel_state_t string_tok_state;
 static lbm_char_channel_t string_tok;
@@ -114,7 +126,22 @@ void lispif_init(void) {
 	heap = memalign(8, heap_size * sizeof(lbm_cons_t));
 	memory_array = heap_caps_malloc(mem_size * sizeof(uint32_t), MALLOC_CAP_DMA);
 	bitmap_array = heap_caps_malloc(bitmap_size * sizeof(uint32_t), MALLOC_CAP_DMA);
+	#ifdef HW_PSRAM
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    psram_allocation_size = free_psram - (256 * 1024); // Leave 256KB for system
+    psram_allocation = heap_caps_malloc(psram_allocation_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
+   	if (psram_allocation == NULL) {
+        commands_printf_lisp("Failed to allocate PSRAM");
+    } {
+    	const_heap_ptr = (volatile lbm_uint*)((uintptr_t)psram_allocation & 0xFFFFFFF4);
+    	const_heap_len = psram_allocation_size - ((uintptr_t)const_heap_ptr - (uintptr_t)psram_allocation);
+
+    	lbm_const_heap_init(const_heap_write, &const_heap, (lbm_uint*)const_heap_ptr, const_heap_len);
+
+    	commands_printf_lisp("PSRAM allocated: %u bytes, Const heap size: %u bytes", psram_allocation_size, const_heap_len);
+	}
+	#endif
 	memset(&buffered_tok_state, 0, sizeof(buffered_tok_state));
 	lbm_mutex = xSemaphoreCreateMutex();
 	lispif_restart(false, true, true);
@@ -768,14 +795,16 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 			}
 		}
 
-		if (code_data == 0) {
-			code_data = (char*)flash_helper_code_data_raw(CODE_IND_LISP);
-		}
+    if (code_data == 0) {
+        code_data = (char*)flash_helper_code_data_raw(CODE_IND_LISP);
+    }
 
 		const_heap_max_ind = 0;
+		#ifndef HW_PSRAM
 		const_heap_ptr = (lbm_uint*)(code_data + code_len + 16);
 		const_heap_ptr = (lbm_uint*)((uint32_t)const_heap_ptr & 0xFFFFFFF4);
-		uint32_t const_heap_len = ((uint32_t)code_data + flash_helper_code_size_raw(CODE_IND_LISP)) - (uint32_t)const_heap_ptr;
+		const_heap_len = ((uint32_t)code_data + flash_helper_code_size_raw(CODE_IND_LISP)) - (uint32_t)const_heap_ptr;
+		#endif
 		lbm_const_heap_init(const_heap_write, &const_heap, (lbm_uint*)const_heap_ptr, const_heap_len);
 
 		if (load_code) {
@@ -822,6 +851,21 @@ static void sleep_callback(uint32_t us) {
 	vTaskDelay(t);
 }
 
+#ifdef HW_PSRAM
+static bool const_heap_write(lbm_uint ix, lbm_uint w) {
+    if (const_heap_ptr == NULL) {
+        commands_printf_lisp("Const heap not initialized");
+        return false;
+    }
+    if (ix >= const_heap.size) {
+        commands_printf_lisp("Const heap write out of bounds: %u", ix);
+        return false;
+    }
+
+    const_heap_ptr[ix] = w;
+    return true;
+}
+#else
 static bool const_heap_write(lbm_uint ix, lbm_uint w) {
 	if (ix > const_heap_max_ind) {
 		const_heap_max_ind = ix;
@@ -840,6 +884,7 @@ static bool const_heap_write(lbm_uint ix, lbm_uint w) {
 
 	return true;
 }
+#endif
 
 static void eval_thread(void *arg) {
 	(void)arg;
