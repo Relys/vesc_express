@@ -5,5 +5,5 @@ otadata,data,ota,,0x2000
 phy_init,data,phy,,0x1000
 ota_0,app,ota_0,,1600k
 ota_1,app,ota_1,,1600k
-lisp,data,nvs,,512k
+lisp,app,ota_2,,512k
 qml,data,nvs,,128k

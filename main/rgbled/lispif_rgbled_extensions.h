@@ -22,4 +22,8 @@
 
 void lispif_load_rgbled_extensions();
 
+bool rgbled_init(int pin, unsigned int type_led);
+void rgbled_deinit();
+void rgbled_update(uint8_t * data, size_t size);
+
 #endif /* MAIN_RGBLED_LISPIF_RGBLED_EXTENSIONS_H_ */

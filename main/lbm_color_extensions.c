@@ -124,7 +124,7 @@ static lbm_value ext_color_split(lbm_value *args, lbm_uint argn) {
 	return color_data;
 }
 
-static uint32_t color_mix(uint32_t color1, uint32_t color2, float ratio) {
+uint32_t color_mix(uint32_t color1, uint32_t color2, float ratio) {
 	uint8_t w1 = (color1 >> 24) & 0xFF;
 	uint8_t r1 = (color1 >> 16) & 0xFF;
 	uint8_t g1 = (color1 >> 8) & 0xFF;
@@ -187,7 +187,7 @@ static lbm_value ext_color_mix(lbm_value *args, lbm_uint argn) {
 	}
 }
 
-static uint32_t color_add_sub(uint32_t color1, uint32_t color2, bool sub) {
+uint32_t color_add_sub(uint32_t color1, uint32_t color2, bool sub) {
 	int16_t w1 = (color1 >> 24) & 0xFF;
 	int16_t r1 = (color1 >> 16) & 0xFF;
 	int16_t g1 = (color1 >> 8) & 0xFF;
@@ -265,7 +265,7 @@ static lbm_value ext_color_sub(lbm_value *args, lbm_uint argn) {
 	return ext_color_add_sub(args, argn, true);
 }
 
-static uint32_t color_scale(uint32_t color, float scale) {
+uint32_t color_scale(uint32_t color, float scale) {
 	uint8_t w = (color >> 24) & 0xFF;
 	uint8_t r = (color >> 16) & 0xFF;
 	uint8_t g = (color >> 8) & 0xFF;

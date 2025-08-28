@@ -52,6 +52,7 @@
 #include "comm_usb.h"
 #include "comm_uart.h"
 #include "comm_ble.h"
+#include "flash_helper.h"
 
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -81,7 +82,9 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <string.h>
-
+// Declare native lib extension
+lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn);
+lbm_value ext_unload_native_lib(lbm_value *args, lbm_uint argn);
 typedef struct {
 	// BMS
 	lbm_uint v_tot;
@@ -879,54 +882,6 @@ static lbm_value ext_recv_data(lbm_value *args, lbm_uint argn) {
 	}
 
 	return ENC_SYM_TRUE;
-}
-
-typedef union {
-	uint32_t as_u32;
-	int32_t as_i32;
-	float as_float;
-} eeprom_var;
-
-static bool check_eeprom_addr(int addr) {
-	if (addr < 0 || addr > 127) {
-		lbm_set_error_reason("Address must be 0 to 127");
-		return false;
-	}
-
-	return true;
-}
-
-static bool store_eeprom_var(eeprom_var *v, int address) {
-	if (address < 0 || address > 127) {
-		return false;
-	}
-
-	char buf[10];
-	sprintf(buf, "v%d", address);
-
-	nvs_handle_t my_handle;
-	esp_err_t ok_op = nvs_open("lbm", NVS_READWRITE, &my_handle);
-	esp_err_t ok_set = nvs_set_u32(my_handle, buf, v->as_u32);
-	esp_err_t ok_com = nvs_commit(my_handle);
-	nvs_close(my_handle);
-
-	return ok_op == ESP_OK && ok_set == ESP_OK && ok_com == ESP_OK;
-}
-
-static bool read_eeprom_var(eeprom_var *v, int address) {
-	if (address < 0 || address > 127) {
-		return false;
-	}
-
-	char buf[10];
-	sprintf(buf, "v%d", address);
-
-	nvs_handle_t my_handle;
-	esp_err_t ok_op = nvs_open("lbm", NVS_READONLY, &my_handle);
-	esp_err_t ok_set = nvs_get_u32(my_handle, buf, &v->as_u32);
-	nvs_close(my_handle);
-
-	return ok_op == ESP_OK && ok_set == ESP_OK;
 }
 
 static lbm_value ext_eeprom_store_f(lbm_value *args, lbm_uint argn) {
@@ -5725,7 +5680,9 @@ void lispif_load_vesc_extensions(void) {
 	lbm_add_extension("sleep-light", ext_sleep_light);
 	lbm_add_extension("sleep-config-wakeup-pin", ext_sleep_config_wakeup_pin);
 	lbm_add_extension("rtc-data", ext_rtc_data);
-
+	// Native libraries
+	lbm_add_extension("load-native-lib", ext_load_native_lib);
+	lbm_add_extension("unload-native-lib", ext_unload_native_lib);
 	// Extension libraries
 	lispif_load_disp_extensions();
 	lispif_load_wifi_extensions();

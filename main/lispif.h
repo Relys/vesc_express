@@ -26,6 +26,8 @@
 #include <stddef.h>
 #include "lispbm.h"
 
+#define NATIVE_LIB_MAGIC 0xCAFEBABE
+
 // Functions
 void lispif_init(void);
 int lispif_get_restart_cnt(void);

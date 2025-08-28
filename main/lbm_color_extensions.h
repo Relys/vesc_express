@@ -21,5 +21,8 @@
 #include <stdbool.h>
 
 bool lbm_color_extensions_init(void);
+uint32_t color_scale(uint32_t color, float scale);
+uint32_t color_add_sub(uint32_t color1, uint32_t color2, bool sub);
+uint32_t color_mix(uint32_t color1, uint32_t color2, float ratio);
 
 #endif /* MAIN_LBM_COLOR_EXTENSIONS_H_ */
